@@ -1,0 +1,22 @@
+{
+  "name": "chatgpt-local-control-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A guarded MCP server that lets ChatGPT inspect and control this Mac through explicit local tools.",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "smoke": "node scripts/smoke-test.js",
+    "smoke:privileged": "node scripts/privileged-smoke-test.js",
+    "smoke:oauth": "node scripts/oauth-smoke-test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^16.5.0",
+    "zod": "^3.25.76"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
