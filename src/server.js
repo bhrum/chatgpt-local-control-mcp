@@ -27,6 +27,7 @@ const PORT = Number(process.env.PORT ?? 8787);
 const MCP_PATH = process.env.MCP_PATH ?? "/mcp";
 const STARTED_AT = new Date();
 const CWD = process.cwd();
+const PLATFORM = os.platform();
 const NO_AUTH_SECURITY_SCHEMES = [{ type: "noauth" }];
 const CONTROL_SECURITY_SCHEMES = [{ type: "oauth2", scopes: ["local.control"] }];
 const OAUTH_SCOPES = ["local.read", "local.control"];
@@ -41,6 +42,7 @@ const CONFIG = {
   allowScreenshot: process.env.ALLOW_SCREENSHOT === "1",
   allowOpen: process.env.ALLOW_OPEN === "1",
   allowAppleScript: process.env.ALLOW_APPLESCRIPT === "1",
+  allowGui: process.env.ALLOW_GUI === "1",
   controlPin: process.env.LOCAL_CONTROL_PIN ?? "",
   requireOAuthApprovalPin: process.env.OAUTH_REQUIRE_APPROVAL_PIN === "1",
   oauthTokenTtlSeconds: Number(process.env.OAUTH_TOKEN_TTL_SECONDS ?? 24 * 60 * 60),
@@ -50,7 +52,7 @@ const CONFIG = {
   commandTimeoutMs: Number(process.env.COMMAND_TIMEOUT_MS ?? 15_000),
   safeExecutables: new Set(
     (process.env.SAFE_EXECUTABLES ??
-      "pwd,ls,find,cat,head,tail,wc,du,df,ps,whoami,hostname,git,node,npm,python3,rg,sed")
+      "pwd,ls,find,cat,head,tail,wc,du,df,ps,whoami,hostname,git,git.exe,node,node.exe,npm,npm.cmd,npx,npx.cmd,python,python.exe,python3,python3.exe,rg,rg.exe,sed,where,where.exe,ipconfig,tasklist")
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean)
@@ -59,6 +61,13 @@ const CONFIG = {
 
 const AUDIT_DIR = path.join(CWD, ".mcp-audit");
 const ARTIFACT_DIR = path.join(CWD, ".mcp-artifacts");
+
+function platformLabel() {
+  if (PLATFORM === "darwin") return "Mac";
+  if (PLATFORM === "win32") return "Windows PC";
+  if (PLATFORM === "linux") return "Linux computer";
+  return `${PLATFORM} computer`;
+}
 
 function expandHome(inputPath) {
   if (!inputPath || inputPath === ".") return CWD;
@@ -356,7 +365,56 @@ async function runCommandCapturingFailures(argv, cwd, timeoutMs) {
   }
 }
 
+async function runPowerShellScript(script, { timeoutMs = CONFIG.commandTimeoutMs, env = {}, sta = false } = {}) {
+  if (PLATFORM !== "win32") {
+    throw new Error("PowerShell desktop automation is only supported on Windows.");
+  }
+
+  const args = [
+    ...(sta ? ["-STA"] : []),
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    script,
+  ];
+  const result = await execFileAsync("powershell.exe", args, {
+    timeout: Math.min(Math.max(timeoutMs, 1_000), 120_000),
+    maxBuffer: Math.max(CONFIG.maxCommandOutputChars * 4, 1024 * 1024),
+    env: {
+      ...process.env,
+      LOCAL_CONTROL_PIN: "",
+      ...env,
+    },
+  });
+
+  return {
+    exitCode: 0,
+    stdout: truncateText(result.stdout ?? ""),
+    stderr: truncateText(result.stderr ?? ""),
+  };
+}
+
+async function runPowerShellScriptCapturingFailures(script, timeoutMs) {
+  try {
+    return await runPowerShellScript(script, { timeoutMs });
+  } catch (error) {
+    if (typeof error === "object" && error && "stdout" in error && "stderr" in error) {
+      return {
+        exitCode: typeof error.code === "number" ? error.code : 1,
+        stdout: truncateText(error.stdout ?? ""),
+        stderr: truncateText(error.stderr ?? error.message ?? ""),
+      };
+    }
+    throw error;
+  }
+}
+
 async function runAppleScript(script, timeoutMs = CONFIG.commandTimeoutMs) {
+  if (PLATFORM !== "darwin") {
+    throw new Error("AppleScript automation is only supported on macOS.");
+  }
   const lines = script.split("\n").flatMap((line) => ["-e", line]);
   const result = await execFileAsync("osascript", lines, {
     timeout: Math.min(Math.max(timeoutMs, 1_000), 60_000),
@@ -369,11 +427,280 @@ async function runAppleScript(script, timeoutMs = CONFIG.commandTimeoutMs) {
   };
 }
 
+async function captureScreenshot(screenshotPath) {
+  if (PLATFORM === "darwin") {
+    await execFileAsync("screencapture", ["-x", screenshotPath], { timeout: 15_000 });
+    return;
+  }
+
+  if (PLATFORM === "win32") {
+    await runPowerShellScript(
+      `
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$path = $env:LOCAL_CONTROL_SCREENSHOT_PATH
+$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+$graphics.CopyFromScreen($bounds.Left, $bounds.Top, 0, 0, $bounds.Size)
+$bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+$graphics.Dispose()
+$bitmap.Dispose()
+`,
+      {
+        timeoutMs: 15_000,
+        sta: true,
+        env: { LOCAL_CONTROL_SCREENSHOT_PATH: screenshotPath },
+      }
+    );
+    return;
+  }
+
+  throw new Error(`Screenshot capture is not implemented for ${PLATFORM}.`);
+}
+
+async function openTarget(target) {
+  if (PLATFORM === "darwin") {
+    const result = await execFileAsync("open", [expandHome(target)], { timeout: 15_000 });
+    return {
+      exitCode: 0,
+      stdout: truncateText(result.stdout ?? ""),
+      stderr: truncateText(result.stderr ?? ""),
+    };
+  }
+
+  if (PLATFORM === "win32") {
+    return await runPowerShellScript("Start-Process -FilePath $env:LOCAL_CONTROL_OPEN_TARGET", {
+      timeoutMs: 15_000,
+      env: { LOCAL_CONTROL_OPEN_TARGET: expandHome(target) },
+    });
+  }
+
+  if (PLATFORM === "linux") {
+    const result = await execFileAsync("xdg-open", [expandHome(target)], { timeout: 15_000 });
+    return {
+      exitCode: 0,
+      stdout: truncateText(result.stdout ?? ""),
+      stderr: truncateText(result.stderr ?? ""),
+    };
+  }
+
+  throw new Error(`Opening targets is not implemented for ${PLATFORM}.`);
+}
+
+const WINDOWS_KEY_CODES = new Map(
+  Object.entries({
+    BACKSPACE: 0x08,
+    TAB: 0x09,
+    ENTER: 0x0d,
+    RETURN: 0x0d,
+    SHIFT: 0x10,
+    CTRL: 0x11,
+    CONTROL: 0x11,
+    ALT: 0x12,
+    PAUSE: 0x13,
+    CAPSLOCK: 0x14,
+    CAPS_LOCK: 0x14,
+    ESC: 0x1b,
+    ESCAPE: 0x1b,
+    SPACE: 0x20,
+    PAGEUP: 0x21,
+    PAGE_UP: 0x21,
+    PAGEDOWN: 0x22,
+    PAGE_DOWN: 0x22,
+    END: 0x23,
+    HOME: 0x24,
+    LEFT: 0x25,
+    UP: 0x26,
+    RIGHT: 0x27,
+    DOWN: 0x28,
+    PRINTSCREEN: 0x2c,
+    PRINT_SCREEN: 0x2c,
+    INSERT: 0x2d,
+    INS: 0x2d,
+    DELETE: 0x2e,
+    DEL: 0x2e,
+    WIN: 0x5b,
+    WINDOWS: 0x5b,
+    META: 0x5b,
+    COMMAND: 0x5b,
+    NUMLOCK: 0x90,
+    NUM_LOCK: 0x90,
+    SCROLLLOCK: 0x91,
+    SCROLL_LOCK: 0x91,
+  })
+);
+
+for (let index = 1; index <= 24; index += 1) {
+  WINDOWS_KEY_CODES.set(`F${index}`, 0x6f + index);
+}
+
+function windowsKeyCode(key) {
+  const normalized = String(key).trim().toUpperCase().replace(/\s+/g, "_");
+  if (/^[A-Z]$/.test(normalized) || /^[0-9]$/.test(normalized)) {
+    return normalized.charCodeAt(0);
+  }
+  if (WINDOWS_KEY_CODES.has(normalized)) {
+    return WINDOWS_KEY_CODES.get(normalized);
+  }
+  throw new Error(`Unsupported Windows key "${key}". Use names like CTRL, ALT, WIN, ENTER, ESC, A, 1, or F5.`);
+}
+
+async function getWindowsCursorPosition() {
+  const result = await runPowerShellScript(
+    `
+Add-Type -AssemblyName System.Windows.Forms
+$position = [System.Windows.Forms.Cursor]::Position
+Write-Output "$($position.X),$($position.Y)"
+`,
+    { timeoutMs: 5_000, sta: true }
+  );
+  const [x, y] = result.stdout.text.trim().split(",").map((value) => Number(value));
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    throw new Error("Could not read cursor position.");
+  }
+  return { x, y };
+}
+
+async function moveWindowsMouse(x, y) {
+  await runPowerShellScript(
+    `
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point([int]$env:LOCAL_CONTROL_MOUSE_X, [int]$env:LOCAL_CONTROL_MOUSE_Y)
+`,
+    {
+      timeoutMs: 5_000,
+      sta: true,
+      env: {
+        LOCAL_CONTROL_MOUSE_X: String(x),
+        LOCAL_CONTROL_MOUSE_Y: String(y),
+      },
+    }
+  );
+}
+
+async function clickWindowsMouse(x, y, button, clicks) {
+  const flags = {
+    left: { down: 0x0002, up: 0x0004 },
+    right: { down: 0x0008, up: 0x0010 },
+    middle: { down: 0x0020, up: 0x0040 },
+  }[button];
+
+  await runPowerShellScript(
+    `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class LocalControlMouse {
+  [DllImport("user32.dll")]
+  public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")]
+  public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+}
+"@
+$x = [int]$env:LOCAL_CONTROL_MOUSE_X
+$y = [int]$env:LOCAL_CONTROL_MOUSE_Y
+$down = [uint32]$env:LOCAL_CONTROL_MOUSE_DOWN
+$up = [uint32]$env:LOCAL_CONTROL_MOUSE_UP
+$clicks = [int]$env:LOCAL_CONTROL_MOUSE_CLICKS
+[LocalControlMouse]::SetCursorPos($x, $y) | Out-Null
+Start-Sleep -Milliseconds 50
+for ($i = 0; $i -lt $clicks; $i++) {
+  [LocalControlMouse]::mouse_event($down, 0, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 35
+  [LocalControlMouse]::mouse_event($up, 0, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 80
+}
+`,
+    {
+      timeoutMs: 10_000,
+      env: {
+        LOCAL_CONTROL_MOUSE_X: String(x),
+        LOCAL_CONTROL_MOUSE_Y: String(y),
+        LOCAL_CONTROL_MOUSE_DOWN: String(flags.down),
+        LOCAL_CONTROL_MOUSE_UP: String(flags.up),
+        LOCAL_CONTROL_MOUSE_CLICKS: String(clicks),
+      },
+    }
+  );
+}
+
+async function pressWindowsKeys(keys, holdMs) {
+  const codes = keys.map(windowsKeyCode);
+  await runPowerShellScript(
+    `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class LocalControlKeyboard {
+  [DllImport("user32.dll")]
+  public static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
+}
+"@
+$codes = $env:LOCAL_CONTROL_KEY_CODES -split "," | ForEach-Object { [byte]$_ }
+$holdMs = [int]$env:LOCAL_CONTROL_KEY_HOLD_MS
+foreach ($code in $codes) {
+  [LocalControlKeyboard]::keybd_event($code, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 20
+}
+Start-Sleep -Milliseconds $holdMs
+[array]::Reverse($codes)
+foreach ($code in $codes) {
+  [LocalControlKeyboard]::keybd_event($code, 0, 2, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 20
+}
+`,
+    {
+      timeoutMs: 10_000,
+      env: {
+        LOCAL_CONTROL_KEY_CODES: codes.join(","),
+        LOCAL_CONTROL_KEY_HOLD_MS: String(holdMs),
+      },
+    }
+  );
+}
+
+async function typeWindowsText(text, restoreClipboard) {
+  if (Buffer.byteLength(text, "utf8") > 16_000) {
+    throw new Error("type_text is limited to 16KB of UTF-8 text. Use write_file for larger content.");
+  }
+
+  await runPowerShellScript(
+    `
+Add-Type -AssemblyName System.Windows.Forms
+$bytes = [Convert]::FromBase64String($env:LOCAL_CONTROL_TYPE_TEXT_B64)
+$text = [System.Text.Encoding]::UTF8.GetString($bytes)
+$restore = $env:LOCAL_CONTROL_RESTORE_CLIPBOARD -eq "1"
+$hadText = [System.Windows.Forms.Clipboard]::ContainsText()
+$previousText = ""
+if ($hadText) {
+  $previousText = [System.Windows.Forms.Clipboard]::GetText()
+}
+[System.Windows.Forms.Clipboard]::SetText($text)
+Start-Sleep -Milliseconds 80
+[System.Windows.Forms.SendKeys]::SendWait("^v")
+Start-Sleep -Milliseconds 300
+if ($restore -and $hadText) {
+  [System.Windows.Forms.Clipboard]::SetText($previousText)
+}
+`,
+    {
+      timeoutMs: 15_000,
+      sta: true,
+      env: {
+        LOCAL_CONTROL_TYPE_TEXT_B64: Buffer.from(text, "utf8").toString("base64"),
+        LOCAL_CONTROL_RESTORE_CLIPBOARD: restoreClipboard ? "1" : "0",
+      },
+    }
+  );
+}
+
 const TOOL_DESCRIPTORS = [
   {
     name: "computer_status",
     title: "Computer status",
-    description: "Return basic status for this Mac MCP server, including allowed file roots and enabled capabilities.",
+    description: "Return basic status for this local computer MCP server, including allowed file roots and enabled capabilities.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: {
       readOnlyHint: true,
@@ -382,7 +709,7 @@ const TOOL_DESCRIPTORS = [
       idempotentHint: true,
     },
     securitySchemes: NO_AUTH_SECURITY_SCHEMES,
-    _meta: toolMeta("Checking Mac control status", "Mac control status ready"),
+    _meta: toolMeta("Checking computer control status", "Computer control status ready"),
   },
   {
     name: "list_directory",
@@ -485,7 +812,7 @@ const TOOL_DESCRIPTORS = [
   {
     name: "take_screenshot",
     title: "Take screenshot",
-    description: "Capture the Mac screen and return it as an MCP image. Requires OAuth scope local.control or the fallback control_pin.",
+    description: "Capture the local screen and return it as an MCP image. Requires OAuth scope local.control or the fallback control_pin.",
     inputSchema: {
       type: "object",
       properties: {
@@ -505,7 +832,7 @@ const TOOL_DESCRIPTORS = [
   {
     name: "open_target",
     title: "Open target",
-    description: "Open a URL, file, folder, or app with macOS open. Requires OAuth scope local.control or the fallback control_pin.",
+    description: "Open a URL, file, folder, or app on the local computer. Requires OAuth scope local.control or the fallback control_pin.",
     inputSchema: {
       type: "object",
       properties: {
@@ -547,6 +874,149 @@ const TOOL_DESCRIPTORS = [
     securitySchemes: CONTROL_SECURITY_SCHEMES,
     _meta: toolMeta("Running AppleScript", "AppleScript finished", CONTROL_SECURITY_SCHEMES),
   },
+  {
+    name: "run_powershell",
+    title: "Run PowerShell",
+    description:
+      "Run a Windows PowerShell script. Requires ALLOW_SHELL=1, ALLOW_UNSAFE_SHELL=1, and OAuth scope local.control or the fallback control_pin.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        script: { type: "string", minLength: 1 },
+        timeoutMs: { type: "integer", minimum: 1000, maximum: 120000 },
+        control_pin: { type: "string", description: "Fallback local PIN. Not needed when the app is OAuth-authorized." },
+      },
+      required: ["script"],
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: true,
+      idempotentHint: false,
+    },
+    securitySchemes: CONTROL_SECURITY_SCHEMES,
+    _meta: toolMeta("Running PowerShell", "PowerShell finished", CONTROL_SECURITY_SCHEMES),
+  },
+  {
+    name: "get_cursor_position",
+    title: "Get cursor position",
+    description:
+      "Return the current Windows mouse cursor coordinates. Requires ALLOW_GUI=1 and OAuth scope local.control or the fallback control_pin.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        control_pin: { type: "string", description: "Fallback local PIN. Not needed when the app is OAuth-authorized." },
+      },
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+      idempotentHint: true,
+    },
+    securitySchemes: CONTROL_SECURITY_SCHEMES,
+    _meta: toolMeta("Reading cursor position", "Cursor position ready", CONTROL_SECURITY_SCHEMES),
+  },
+  {
+    name: "move_mouse",
+    title: "Move mouse",
+    description:
+      "Move the Windows mouse cursor to screen coordinates. Requires ALLOW_GUI=1 and OAuth scope local.control or the fallback control_pin.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        x: { type: "integer", minimum: -32768, maximum: 32767 },
+        y: { type: "integer", minimum: -32768, maximum: 32767 },
+        control_pin: { type: "string", description: "Fallback local PIN. Not needed when the app is OAuth-authorized." },
+      },
+      required: ["x", "y"],
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+      idempotentHint: false,
+    },
+    securitySchemes: CONTROL_SECURITY_SCHEMES,
+    _meta: toolMeta("Moving mouse", "Mouse moved", CONTROL_SECURITY_SCHEMES),
+  },
+  {
+    name: "mouse_click",
+    title: "Mouse click",
+    description:
+      "Click Windows screen coordinates with the selected mouse button. Requires ALLOW_GUI=1 and OAuth scope local.control or the fallback control_pin.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        x: { type: "integer", minimum: -32768, maximum: 32767 },
+        y: { type: "integer", minimum: -32768, maximum: 32767 },
+        button: { type: "string", enum: ["left", "right", "middle"] },
+        clicks: { type: "integer", minimum: 1, maximum: 3 },
+        control_pin: { type: "string", description: "Fallback local PIN. Not needed when the app is OAuth-authorized." },
+      },
+      required: ["x", "y"],
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+      idempotentHint: false,
+    },
+    securitySchemes: CONTROL_SECURITY_SCHEMES,
+    _meta: toolMeta("Clicking mouse", "Mouse click finished", CONTROL_SECURITY_SCHEMES),
+  },
+  {
+    name: "press_keys",
+    title: "Press keys",
+    description:
+      "Press a Windows keyboard chord such as ['CTRL','L'], ['ALT','TAB'], or ['WIN','R']. Requires ALLOW_GUI=1 and OAuth scope local.control or the fallback control_pin.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        keys: { type: "array", items: { type: "string" }, minItems: 1 },
+        holdMs: { type: "integer", minimum: 10, maximum: 2000 },
+        control_pin: { type: "string", description: "Fallback local PIN. Not needed when the app is OAuth-authorized." },
+      },
+      required: ["keys"],
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: true,
+      idempotentHint: false,
+    },
+    securitySchemes: CONTROL_SECURITY_SCHEMES,
+    _meta: toolMeta("Pressing keys", "Key press finished", CONTROL_SECURITY_SCHEMES),
+  },
+  {
+    name: "type_text",
+    title: "Type text",
+    description:
+      "Paste text into the active Windows application using the clipboard. Requires ALLOW_GUI=1 and OAuth scope local.control or the fallback control_pin.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string" },
+        restoreClipboard: { type: "boolean" },
+        control_pin: { type: "string", description: "Fallback local PIN. Not needed when the app is OAuth-authorized." },
+      },
+      required: ["text"],
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: true,
+      idempotentHint: false,
+    },
+    securitySchemes: CONTROL_SECURITY_SCHEMES,
+    _meta: toolMeta("Typing text", "Text typed", CONTROL_SECURITY_SCHEMES),
+  },
 ];
 
 function createLocalControlServer(authContext = { scopes: [] }) {
@@ -554,7 +1024,7 @@ function createLocalControlServer(authContext = { scopes: [] }) {
     name: "chatgpt-local-control",
     version: "0.1.0",
     instructions:
-      "Use these tools to inspect and control the user's Mac only when the user explicitly asks. Read-only tools do not require auth. Privileged tools require OAuth scope local.control or the fallback control_pin.",
+      `Use these tools to inspect and control the user's ${platformLabel()} only when the user explicitly asks. Read-only tools do not require auth. Privileged tools require OAuth scope local.control or the fallback control_pin.`,
   });
 
   server.registerTool(
@@ -562,7 +1032,7 @@ function createLocalControlServer(authContext = { scopes: [] }) {
     {
       title: "Computer status",
       description:
-        "Return basic status for this Mac MCP server, including allowed file roots and enabled capabilities.",
+        "Return basic status for this local computer MCP server, including allowed file roots and enabled capabilities.",
       inputSchema: {},
       outputSchema: {
         ok: z.boolean(),
@@ -581,7 +1051,7 @@ function createLocalControlServer(authContext = { scopes: [] }) {
         openWorldHint: false,
         idempotentHint: true,
       },
-      _meta: toolMeta("Checking Mac control status", "Mac control status ready"),
+      _meta: toolMeta("Checking computer control status", "Computer control status ready"),
     },
     async () => {
       try {
@@ -589,7 +1059,7 @@ function createLocalControlServer(authContext = { scopes: [] }) {
         return asTextResult({
         ok: true,
         hostname: os.hostname(),
-        platform: os.platform(),
+        platform: PLATFORM,
         arch: os.arch(),
         cwd: CWD,
         allowedRoots: ALLOWED_ROOTS,
@@ -600,6 +1070,8 @@ function createLocalControlServer(authContext = { scopes: [] }) {
           screenshot: CONFIG.allowScreenshot,
           open: CONFIG.allowOpen,
           appleScript: CONFIG.allowAppleScript,
+          gui: CONFIG.allowGui,
+          powerShell: PLATFORM === "win32",
           readToolsRequireAuth: false,
           oauth: true,
           oauthApprovalPinRequired: CONFIG.requireOAuthApprovalPin && hasConfiguredControlPin(),
@@ -821,7 +1293,7 @@ function createLocalControlServer(authContext = { scopes: [] }) {
     {
       title: "Take screenshot",
       description:
-        "Capture the Mac screen and return it as an MCP image. Requires ALLOW_SCREENSHOT=1 and OAuth scope local.control or the fallback control_pin.",
+        "Capture the local screen and return it as an MCP image. Requires ALLOW_SCREENSHOT=1 and OAuth scope local.control or the fallback control_pin.",
       inputSchema: {
         control_pin: z.string().optional(),
       },
@@ -847,7 +1319,7 @@ function createLocalControlServer(authContext = { scopes: [] }) {
           "screenshots",
           `screen-${new Date().toISOString().replace(/[:.]/g, "-")}.png`
         );
-        await execFileAsync("screencapture", ["-x", screenshotPath], { timeout: 15_000 });
+        await captureScreenshot(screenshotPath);
         const image = await readFile(screenshotPath);
         const structured = {
           path: screenshotPath,
@@ -869,7 +1341,7 @@ function createLocalControlServer(authContext = { scopes: [] }) {
     {
       title: "Open target",
       description:
-        "Open a URL, file, folder, or app with macOS open. Requires ALLOW_OPEN=1 and OAuth scope local.control or the fallback control_pin.",
+        "Open a URL, file, folder, or app on the local computer. Requires ALLOW_OPEN=1 and OAuth scope local.control or the fallback control_pin.",
       inputSchema: {
         target: z.string().min(1).describe("A URL, file path, folder path, or app name/path."),
         control_pin: z.string().optional(),
@@ -891,13 +1363,13 @@ function createLocalControlServer(authContext = { scopes: [] }) {
     async ({ target, control_pin }) => {
       try {
         requireCapability("open", CONFIG.allowOpen, control_pin, authContext);
-        const result = await execFileAsync("open", [expandHome(target)], { timeout: 15_000 });
+        const result = await openTarget(target);
         await audit({ tool: "open_target", target });
         return asTextResult({
           target,
-          exitCode: 0,
-          stdout: truncateText(result.stdout ?? ""),
-          stderr: truncateText(result.stderr ?? ""),
+          exitCode: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
         });
       } catch (error) {
         return asError(error);
@@ -935,6 +1407,228 @@ function createLocalControlServer(authContext = { scopes: [] }) {
         const result = await runAppleScript(script, timeoutMs);
         await audit({ tool: "run_applescript", scriptPreview: script.slice(0, 500), exitCode: result.exitCode });
         return asTextResult(result);
+      } catch (error) {
+        return asError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "run_powershell",
+    {
+      title: "Run PowerShell",
+      description:
+        "Run a Windows PowerShell script. Requires ALLOW_SHELL=1, ALLOW_UNSAFE_SHELL=1, and OAuth scope local.control or the fallback control_pin.",
+      inputSchema: {
+        script: z.string().min(1),
+        timeoutMs: z.number().int().min(1000).max(120000).optional(),
+        control_pin: z.string().optional(),
+      },
+      outputSchema: {
+        exitCode: z.number(),
+        stdout: z.object({ text: z.string(), truncated: z.boolean() }),
+        stderr: z.object({ text: z.string(), truncated: z.boolean() }),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        openWorldHint: true,
+        idempotentHint: false,
+      },
+      _meta: toolMeta("Running PowerShell", "PowerShell finished", CONTROL_SECURITY_SCHEMES),
+    },
+    async ({ script, timeoutMs, control_pin }) => {
+      try {
+        requireCapability("shell", CONFIG.allowShell, control_pin, authContext);
+        if (!CONFIG.allowUnsafeShell) {
+          throw new Error("run_powershell requires ALLOW_UNSAFE_SHELL=1 because scripts can perform arbitrary actions.");
+        }
+        const result = await runPowerShellScriptCapturingFailures(script, timeoutMs);
+        await audit({ tool: "run_powershell", scriptPreview: script.slice(0, 500), exitCode: result.exitCode });
+        return asTextResult(result);
+      } catch (error) {
+        return asError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "get_cursor_position",
+    {
+      title: "Get cursor position",
+      description:
+        "Return the current Windows mouse cursor coordinates. Requires ALLOW_GUI=1 and OAuth scope local.control or the fallback control_pin.",
+      inputSchema: {
+        control_pin: z.string().optional(),
+      },
+      outputSchema: {
+        x: z.number(),
+        y: z.number(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+        idempotentHint: true,
+      },
+      _meta: toolMeta("Reading cursor position", "Cursor position ready", CONTROL_SECURITY_SCHEMES),
+    },
+    async ({ control_pin }) => {
+      try {
+        requireCapability("gui", CONFIG.allowGui, control_pin, authContext);
+        if (PLATFORM !== "win32") throw new Error("Cursor position is only implemented for Windows.");
+        const position = await getWindowsCursorPosition();
+        await audit({ tool: "get_cursor_position", ...position });
+        return asTextResult(position);
+      } catch (error) {
+        return asError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "move_mouse",
+    {
+      title: "Move mouse",
+      description:
+        "Move the Windows mouse cursor to screen coordinates. Requires ALLOW_GUI=1 and OAuth scope local.control or the fallback control_pin.",
+      inputSchema: {
+        x: z.number().int().min(-32768).max(32767),
+        y: z.number().int().min(-32768).max(32767),
+        control_pin: z.string().optional(),
+      },
+      outputSchema: {
+        x: z.number(),
+        y: z.number(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false,
+        idempotentHint: false,
+      },
+      _meta: toolMeta("Moving mouse", "Mouse moved", CONTROL_SECURITY_SCHEMES),
+    },
+    async ({ x, y, control_pin }) => {
+      try {
+        requireCapability("gui", CONFIG.allowGui, control_pin, authContext);
+        if (PLATFORM !== "win32") throw new Error("Mouse movement is only implemented for Windows.");
+        await moveWindowsMouse(x, y);
+        await audit({ tool: "move_mouse", x, y });
+        return asTextResult({ x, y });
+      } catch (error) {
+        return asError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "mouse_click",
+    {
+      title: "Mouse click",
+      description:
+        "Click Windows screen coordinates with the selected mouse button. Requires ALLOW_GUI=1 and OAuth scope local.control or the fallback control_pin.",
+      inputSchema: {
+        x: z.number().int().min(-32768).max(32767),
+        y: z.number().int().min(-32768).max(32767),
+        button: z.enum(["left", "right", "middle"]).optional(),
+        clicks: z.number().int().min(1).max(3).optional(),
+        control_pin: z.string().optional(),
+      },
+      outputSchema: {
+        x: z.number(),
+        y: z.number(),
+        button: z.string(),
+        clicks: z.number(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        openWorldHint: false,
+        idempotentHint: false,
+      },
+      _meta: toolMeta("Clicking mouse", "Mouse click finished", CONTROL_SECURITY_SCHEMES),
+    },
+    async ({ x, y, button = "left", clicks = 1, control_pin }) => {
+      try {
+        requireCapability("gui", CONFIG.allowGui, control_pin, authContext);
+        if (PLATFORM !== "win32") throw new Error("Mouse clicks are only implemented for Windows.");
+        await clickWindowsMouse(x, y, button, clicks);
+        await audit({ tool: "mouse_click", x, y, button, clicks });
+        return asTextResult({ x, y, button, clicks });
+      } catch (error) {
+        return asError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "press_keys",
+    {
+      title: "Press keys",
+      description:
+        "Press a Windows keyboard chord such as ['CTRL','L'], ['ALT','TAB'], or ['WIN','R']. Requires ALLOW_GUI=1 and OAuth scope local.control or the fallback control_pin.",
+      inputSchema: {
+        keys: z.array(z.string()).min(1),
+        holdMs: z.number().int().min(10).max(2000).optional(),
+        control_pin: z.string().optional(),
+      },
+      outputSchema: {
+        keys: z.array(z.string()),
+        holdMs: z.number(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        openWorldHint: true,
+        idempotentHint: false,
+      },
+      _meta: toolMeta("Pressing keys", "Key press finished", CONTROL_SECURITY_SCHEMES),
+    },
+    async ({ keys, holdMs = 80, control_pin }) => {
+      try {
+        requireCapability("gui", CONFIG.allowGui, control_pin, authContext);
+        if (PLATFORM !== "win32") throw new Error("Keyboard input is only implemented for Windows.");
+        await pressWindowsKeys(keys, holdMs);
+        await audit({ tool: "press_keys", keys, holdMs });
+        return asTextResult({ keys, holdMs });
+      } catch (error) {
+        return asError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "type_text",
+    {
+      title: "Type text",
+      description:
+        "Paste text into the active Windows application using the clipboard. Requires ALLOW_GUI=1 and OAuth scope local.control or the fallback control_pin.",
+      inputSchema: {
+        text: z.string(),
+        restoreClipboard: z.boolean().optional(),
+        control_pin: z.string().optional(),
+      },
+      outputSchema: {
+        bytesTyped: z.number(),
+        restoreClipboard: z.boolean(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        openWorldHint: true,
+        idempotentHint: false,
+      },
+      _meta: toolMeta("Typing text", "Text typed", CONTROL_SECURITY_SCHEMES),
+    },
+    async ({ text, restoreClipboard = true, control_pin }) => {
+      try {
+        requireCapability("gui", CONFIG.allowGui, control_pin, authContext);
+        if (PLATFORM !== "win32") throw new Error("Text input is only implemented for Windows.");
+        await typeWindowsText(text, restoreClipboard);
+        const bytesTyped = Buffer.byteLength(text, "utf8");
+        await audit({ tool: "type_text", bytesTyped, restoreClipboard });
+        return asTextResult({ bytesTyped, restoreClipboard });
       } catch (error) {
         return asError(error);
       }
@@ -984,12 +1678,14 @@ function renderAuthorizePage(res, params, error = "") {
   const errorMarkup = error ? `<p style="color:#b00020;">${htmlEscape(error)}</p>` : "";
 
   res.writeHead(200, { "content-type": "text/html; charset=utf-8", ...corsHeaders() });
+  const label = platformLabel();
+
   res.end(`<!doctype html>
 <html>
-  <head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize Local Mac Control</title></head>
+  <head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize Local Computer Control</title></head>
   <body style="font-family: system-ui, sans-serif; max-width: 620px; margin: 48px auto; line-height: 1.5;">
-    <h1>Authorize Local Mac Control</h1>
-    <p>This grants ChatGPT permission to use local control tools such as writing files, running commands, taking screenshots, opening targets, and AppleScript automation. Read-only file tools do not require authorization.</p>
+    <h1>Authorize Local Computer Control</h1>
+    <p>This grants ChatGPT permission to use local control tools on this ${htmlEscape(label)}, such as writing files, running commands, taking screenshots, opening targets, and desktop automation. Read-only file tools do not require authorization.</p>
     ${errorMarkup}
     <form method="get" action="/oauth/authorize">
       ${hidden}
@@ -1117,6 +1813,8 @@ const httpServer = createServer(async (req, res) => {
         screenshot: CONFIG.allowScreenshot,
         open: CONFIG.allowOpen,
         appleScript: CONFIG.allowAppleScript,
+        gui: CONFIG.allowGui,
+        powerShell: PLATFORM === "win32",
         readToolsRequireAuth: false,
         oauth: true,
         pinFallbackForControl: hasConfiguredControlPin(),

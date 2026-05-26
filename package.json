@@ -3,13 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "A guarded MCP server that lets ChatGPT inspect and control this Mac through explicit local tools.",
+  "description": "A guarded MCP server that lets ChatGPT inspect and control this computer through explicit local tools.",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "service:install": "bash scripts/install-launchd.sh",
     "service:status": "bash scripts/status-launchd.sh",
     "service:uninstall": "bash scripts/uninstall-launchd.sh",
+    "tunnel": "node scripts/start-cloudflare-tunnel.js",
     "smoke": "node scripts/smoke-test.js",
     "smoke:privileged": "node scripts/privileged-smoke-test.js",
     "smoke:oauth": "node scripts/oauth-smoke-test.js"

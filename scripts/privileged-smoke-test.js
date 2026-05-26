@@ -43,15 +43,49 @@ const commandResult = await client.callTool({
 console.log(`run_command: ${commandResult.isError ? "failed" : "ok"}`);
 console.log(commandResult.structuredContent?.stdout?.text?.trim() ?? "");
 
-const appleScriptResult = await client.callTool({
-  name: "run_applescript",
-  arguments: {
-    script: "return \"applescript-ok\"",
-    control_pin: controlPin,
-  },
-});
-console.log(`run_applescript: ${appleScriptResult.isError ? "failed" : "ok"}`);
-console.log(appleScriptResult.structuredContent?.stdout?.text?.trim() ?? "");
+if (process.platform === "darwin") {
+  const appleScriptResult = await client.callTool({
+    name: "run_applescript",
+    arguments: {
+      script: "return \"applescript-ok\"",
+      control_pin: controlPin,
+    },
+  });
+  console.log(`run_applescript: ${appleScriptResult.isError ? "failed" : "ok"}`);
+  console.log(appleScriptResult.structuredContent?.stdout?.text?.trim() ?? "");
+}
+
+if (process.platform === "win32") {
+  const powerShellResult = await client.callTool({
+    name: "run_powershell",
+    arguments: {
+      script: "Write-Output 'powershell-ok'",
+      control_pin: controlPin,
+    },
+  });
+  console.log(`run_powershell: ${powerShellResult.isError ? "failed" : "ok"}`);
+  console.log(powerShellResult.structuredContent?.stdout?.text?.trim() ?? "");
+
+  const cursorResult = await client.callTool({
+    name: "get_cursor_position",
+    arguments: {
+      control_pin: controlPin,
+    },
+  });
+  console.log(`get_cursor_position: ${cursorResult.isError ? "failed" : "ok"}`);
+  if (!cursorResult.isError) {
+    const { x, y } = cursorResult.structuredContent;
+    const moveResult = await client.callTool({
+      name: "move_mouse",
+      arguments: {
+        x,
+        y,
+        control_pin: controlPin,
+      },
+    });
+    console.log(`move_mouse: ${moveResult.isError ? "failed" : "ok"}`);
+  }
+}
 
 const screenshotResult = await client.callTool({
   name: "take_screenshot",
