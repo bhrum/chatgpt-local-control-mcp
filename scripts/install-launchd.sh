@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BIN_DIR="$ROOT_DIR/.bin"
 LOG_DIR="$ROOT_DIR/.mcp-logs"
 ARTIFACT_DIR="$ROOT_DIR/.mcp-artifacts"
+TUNNEL_ENV_FILE="$ARTIFACT_DIR/named-tunnel.env"
 LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
 SERVER_LABEL="com.chatgpt.local-control-mcp"
 TUNNEL_LABEL="com.chatgpt.local-control-tunnel"
@@ -12,8 +13,19 @@ SERVER_PLIST="$LAUNCH_AGENT_DIR/$SERVER_LABEL.plist"
 TUNNEL_PLIST="$LAUNCH_AGENT_DIR/$TUNNEL_LABEL.plist"
 GUI_DOMAIN="gui/$(id -u)"
 NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
+CLOUDFLARED_TUNNEL_NAME="${CLOUDFLARED_TUNNEL_NAME:-}"
+CLOUDFLARED_TUNNEL_HOSTNAME="${CLOUDFLARED_TUNNEL_HOSTNAME:-}"
 
 mkdir -p "$BIN_DIR" "$LOG_DIR" "$ARTIFACT_DIR" "$LAUNCH_AGENT_DIR"
+
+if [[ -f "$TUNNEL_ENV_FILE" ]]; then
+  while IFS='=' read -r key value; do
+    case "$key" in
+      CLOUDFLARED_TUNNEL_NAME) CLOUDFLARED_TUNNEL_NAME="$value" ;;
+      CLOUDFLARED_TUNNEL_HOSTNAME) CLOUDFLARED_TUNNEL_HOSTNAME="$value" ;;
+    esac
+  done < <(grep -E '^(CLOUDFLARED_TUNNEL_NAME|CLOUDFLARED_TUNNEL_HOSTNAME)=' "$TUNNEL_ENV_FILE" || true)
+fi
 
 xml_escape() {
   local value="$1"
@@ -65,12 +77,29 @@ ensure_cloudflared() {
 write_plists() {
   local root_esc node_esc server_esc log_esc path_esc
   local cloudflared_esc
+  local tunnel_args
   root_esc="$(xml_escape "$ROOT_DIR")"
   node_esc="$(xml_escape "$NODE_BIN")"
   server_esc="$(xml_escape "$ROOT_DIR/src/server.js")"
   cloudflared_esc="$(xml_escape "$BIN_DIR/cloudflared")"
   log_esc="$(xml_escape "$LOG_DIR")"
   path_esc="$(xml_escape "$BIN_DIR:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin")"
+
+  if [[ -n "$CLOUDFLARED_TUNNEL_NAME" ]]; then
+    local tunnel_name_esc
+    tunnel_name_esc="$(xml_escape "$CLOUDFLARED_TUNNEL_NAME")"
+    tunnel_args="    <string>tunnel</string>
+    <string>--url</string>
+    <string>http://localhost:8787</string>
+    <string>--no-autoupdate</string>
+    <string>run</string>
+    <string>$tunnel_name_esc</string>"
+  else
+    tunnel_args="    <string>tunnel</string>
+    <string>--url</string>
+    <string>http://localhost:8787</string>
+    <string>--no-autoupdate</string>"
+  fi
 
   cat > "$SERVER_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -117,10 +146,7 @@ PLIST
   <key>ProgramArguments</key>
   <array>
     <string>$cloudflared_esc</string>
-    <string>tunnel</string>
-    <string>--url</string>
-    <string>http://localhost:8787</string>
-    <string>--no-autoupdate</string>
+$tunnel_args
   </array>
   <key>WorkingDirectory</key>
   <string>$root_esc</string>
@@ -173,5 +199,14 @@ echo "  $TUNNEL_LABEL"
 echo
 echo "Logs:"
 echo "  $LOG_DIR"
-echo "Run npm run service:status to refresh and print the latest tunnel URL:"
-echo "  $ARTIFACT_DIR/tunnel-url.txt"
+if [[ -n "$CLOUDFLARED_TUNNEL_NAME" ]]; then
+  echo "Named tunnel:"
+  echo "  $CLOUDFLARED_TUNNEL_NAME"
+fi
+if [[ -n "$CLOUDFLARED_TUNNEL_HOSTNAME" ]]; then
+  echo "Fixed tunnel URL:"
+  echo "  https://$CLOUDFLARED_TUNNEL_HOSTNAME/mcp"
+else
+  echo "Run npm run service:status to refresh and print the latest tunnel URL:"
+  echo "  $ARTIFACT_DIR/tunnel-url.txt"
+fi

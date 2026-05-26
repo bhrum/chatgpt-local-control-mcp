@@ -34,7 +34,7 @@ npm run service:install
 这会创建两个用户级 LaunchAgent：
 
 - `com.chatgpt.local-control-mcp`: 常驻本机 MCP 服务，监听 `http://localhost:8787/mcp`
-- `com.chatgpt.local-control-tunnel`: 常驻 Cloudflare quick tunnel，并把公开地址写入 `.mcp-logs/tunnel.err.log`
+- `com.chatgpt.local-control-tunnel`: 常驻 Cloudflare tunnel。默认使用 quick tunnel；如果存在 `.mcp-artifacts/named-tunnel.env`，则使用固定 named tunnel。
 
 查看状态：
 
@@ -50,7 +50,14 @@ npm run service:status
 npm run service:uninstall
 ```
 
-注意：Cloudflare quick tunnel 不保证域名永久固定。如果 Mac 重启或 tunnel 重新创建，`.mcp-artifacts/tunnel-url.txt` 里的地址可能改变，需要在 ChatGPT 应用设置里更新 Connector URL。要长期固定域名，建议改成 Cloudflare named tunnel 并绑定自己的域名。
+固定域名配置示例，写入 `.mcp-artifacts/named-tunnel.env` 后重新运行 `npm run service:install`：
+
+```env
+CLOUDFLARED_TUNNEL_NAME=chatgpt-local-control-mcp
+CLOUDFLARED_TUNNEL_HOSTNAME=chatgpt-mcp.ombhrum.com
+```
+
+注意：Cloudflare quick tunnel 不保证域名永久固定。如果 Mac 重启或 tunnel 重新创建，`.mcp-artifacts/tunnel-url.txt` 里的地址可能改变，需要在 ChatGPT 应用设置里更新 Connector URL。要长期固定域名，请使用 Cloudflare named tunnel 并绑定自己的域名。
 
 健康检查：
 
