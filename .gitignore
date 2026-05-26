@@ -1,5 +1,7 @@
 node_modules/
 .env
+.bin/
+.mcp-logs/
 .mcp-audit/
 .mcp-artifacts/
 npm-debug.log*

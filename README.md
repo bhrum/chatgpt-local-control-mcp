@@ -23,6 +23,35 @@ cp .env.example .env
 npm start
 ```
 
+## macOS 常驻运行
+
+安装 launchd 常驻服务：
+
+```bash
+npm run service:install
+```
+
+这会创建两个用户级 LaunchAgent：
+
+- `com.chatgpt.local-control-mcp`: 常驻本机 MCP 服务，监听 `http://localhost:8787/mcp`
+- `com.chatgpt.local-control-tunnel`: 常驻 Cloudflare quick tunnel，并把公开地址写入 `.mcp-logs/tunnel.err.log`
+
+查看状态：
+
+```bash
+npm run service:status
+```
+
+`service:status` 会从 tunnel 日志提取最新公开地址，并刷新 `.mcp-artifacts/tunnel-url.txt`。
+
+卸载常驻服务：
+
+```bash
+npm run service:uninstall
+```
+
+注意：Cloudflare quick tunnel 不保证域名永久固定。如果 Mac 重启或 tunnel 重新创建，`.mcp-artifacts/tunnel-url.txt` 里的地址可能改变，需要在 ChatGPT 应用设置里更新 Connector URL。要长期固定域名，建议改成 Cloudflare named tunnel 并绑定自己的域名。
+
 健康检查：
 
 ```bash
