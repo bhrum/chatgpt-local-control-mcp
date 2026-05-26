@@ -42,6 +42,7 @@ const CONFIG = {
   allowOpen: process.env.ALLOW_OPEN === "1",
   allowAppleScript: process.env.ALLOW_APPLESCRIPT === "1",
   controlPin: process.env.LOCAL_CONTROL_PIN ?? "",
+  requireOAuthApprovalPin: process.env.OAUTH_REQUIRE_APPROVAL_PIN === "1",
   oauthTokenTtlSeconds: Number(process.env.OAUTH_TOKEN_TTL_SECONDS ?? 24 * 60 * 60),
   maxCommandOutputChars: Number(process.env.MAX_COMMAND_OUTPUT_CHARS ?? 20_000),
   maxReadBytes: Number(process.env.MAX_READ_BYTES ?? 262_144),
@@ -601,6 +602,7 @@ function createLocalControlServer(authContext = { scopes: [] }) {
           appleScript: CONFIG.allowAppleScript,
           readToolsRequireAuth: false,
           oauth: true,
+          oauthApprovalPinRequired: CONFIG.requireOAuthApprovalPin && hasConfiguredControlPin(),
           pinFallbackForControl: hasConfiguredControlPin(),
         },
         uptimeSeconds: Math.round(process.uptime()),
@@ -975,7 +977,7 @@ function renderAuthorizePage(res, params, error = "") {
     .filter(([key]) => key !== "approve" && key !== "approval_pin")
     .map(([key, value]) => `<input type="hidden" name="${htmlEscape(key)}" value="${htmlEscape(value)}">`)
     .join("\n");
-  const pinField = hasConfiguredControlPin()
+  const pinField = CONFIG.requireOAuthApprovalPin && hasConfiguredControlPin()
     ? `<label style="display:block;margin:16px 0 8px;">Authorization PIN</label>
       <input name="approval_pin" type="password" autocomplete="current-password" required style="font:inherit;width:100%;box-sizing:border-box;padding:10px 12px;">`
     : "";
@@ -1013,7 +1015,7 @@ function handleOAuthAuthorize(req, res, url) {
     return;
   }
 
-  if (hasConfiguredControlPin()) {
+  if (CONFIG.requireOAuthApprovalPin && hasConfiguredControlPin()) {
     try {
       requirePin(url.searchParams.get("approval_pin") || "");
     } catch {

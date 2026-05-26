@@ -2,7 +2,7 @@
 
 这个项目提供一个本机 MCP server，让 ChatGPT 通过 MCP 连接这台 Mac，执行受限制的本机查看和控制操作。
 
-默认是保守模式：读文件、列目录和查看状态不需要授权；写文件、运行命令、截图、打开 App、AppleScript GUI 自动化都必须在 `.env` 里显式开启，并且需要 ChatGPT 通过 OAuth 授权获得 `local.control` scope。`control_pin` 仍保留为本地脚本 fallback，也用于 OAuth 授权页面确认。
+默认是保守模式：读文件、列目录和查看状态不需要授权；写文件、运行命令、截图、打开 App、AppleScript GUI 自动化都必须在 `.env` 里显式开启，并且需要 ChatGPT 通过 OAuth 授权获得 `local.control` scope。`control_pin` 只保留为本地脚本 fallback，OAuth 授权页默认直接点击 Authorize 即可。
 
 ## 工具
 
@@ -54,7 +54,7 @@ ngrok http 8787
 - Connector URL: `https://你的隧道域名/mcp`
 - Authentication: `OAuth`
 
-ChatGPT 会打开本服务的 OAuth 授权页。输入 `.env` 里的 `LOCAL_CONTROL_PIN` 后，ChatGPT 会获得 `local.control` access token。之后写文件、命令、截图、打开 App、AppleScript 等工具不需要在聊天里再发送 PIN。
+ChatGPT 会打开本服务的 OAuth 授权页。点击 Authorize 后，ChatGPT 会获得 `local.control` access token。之后写文件、命令、截图、打开 App、AppleScript 等工具不需要在聊天里再发送 PIN。
 
 读工具声明为 `noauth`，所以 `computer_status`、`list_directory`、`read_file` 不需要授权。不要把这个 MCP 暴露给不可信用户。
 
@@ -63,6 +63,7 @@ ChatGPT 会打开本服务的 OAuth 授权页。输入 `.env` 里的 `LOCAL_CONT
 - `LOCAL_CONTROL_ROOTS` 越窄越好。默认只给当前项目目录。
 - 不要长期打开 ngrok/Cloudflare Tunnel。
 - 不要把 `ALLOW_UNSAFE_SHELL=1` 当成常驻配置。
+- 如需让 OAuth 授权页也要求 fallback PIN，可设置 `OAUTH_REQUIRE_APPROVAL_PIN=1`。
 - 当前 OAuth token 存在内存里，服务重启后需要在 ChatGPT 里重新授权。
 - 所有特权工具调用会写入 `.mcp-audit/events.jsonl` 方便追踪。
 

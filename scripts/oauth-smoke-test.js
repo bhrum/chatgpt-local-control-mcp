@@ -5,11 +5,6 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import "dotenv/config";
 
 const mcpUrl = process.env.MCP_URL ?? "http://localhost:8787/mcp";
-const controlPin = process.env.LOCAL_CONTROL_PIN;
-
-if (!controlPin) {
-  throw new Error("LOCAL_CONTROL_PIN is required to authorize the OAuth smoke test.");
-}
 
 function originFromMcpUrl(url) {
   const parsed = new URL(url);
@@ -59,7 +54,6 @@ authorizeUrl.searchParams.set("scope", "local.control");
 authorizeUrl.searchParams.set("code_challenge", challenge);
 authorizeUrl.searchParams.set("code_challenge_method", "S256");
 authorizeUrl.searchParams.set("approve", "1");
-authorizeUrl.searchParams.set("approval_pin", controlPin);
 
 const authorizeResponse = await fetch(authorizeUrl, { redirect: "manual" });
 if (authorizeResponse.status !== 302) {
